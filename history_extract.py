@@ -245,10 +245,4 @@ if __name__ == '__main__':
     app.wrapper.fetchHistoryStarts()
     app.wrapper.fetchHistory()
 
-    try:
         app.run()
-    except KeyboardInterrupt:
-        logger.warning("Caught keyboard interrupt, committing database data before exiting.")
-        connection.commit()
-        connection.close()
-
