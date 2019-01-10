@@ -9,19 +9,19 @@ import sqlite3
 import os
 
 class InitializableContract(Contract):
-    def __init__(self, symbol="", secType="", currency="", exchange=""):
+    def __init__(self, symbol="", secType="", currency="", exchange="", lastTradeDateOrContractMonth="", tradingClass="", multiplier="", primaryExchange="", localSymbol=""):
         self.conId = 0
         self.symbol = symbol
         self.secType = secType
-        self.lastTradeDateOrContractMonth = ""
+        self.lastTradeDateOrContractMonth = lastTradeDateOrContractMonth
         self.strike = 0.  # float !!
         self.right = ""
-        self.multiplier = ""
+        self.multiplier = multiplier
         self.exchange = exchange
-        self.primaryExchange = "" # pick an actual (ie non-aggregate) exchange that the contract trades on.  DO NOT SET TO SMART.
+        self.primaryExchange = primaryExchange # pick an actual (ie non-aggregate) exchange that the contract trades on.  DO NOT SET TO SMART.
         self.currency = currency
-        self.localSymbol = ""
-        self.tradingClass = ""
+        self.localSymbol = localSymbol
+        self.tradingClass = tradingClass
         self.includeExpired = False
         self.secIdType = ""	  # CUSIP;SEDOL;ISIN;RIC
         self.secId = ""
@@ -47,7 +47,8 @@ class HistoryWrapper(EWrapper):
     def fetchHistory(self):
         for target_id in range(0, len(self.targets)):
             app.reqHistoricalData(
-                target_id, self.targets[target_id], "", "15 Y", "1 day", "TRADES", 1, 1, False, []
+                target_id, 
+                self.targets[target_id], "", "15 Y", "1 day", "TRADES", 1, 1, False, []
             )
 
     def addTarget(self, contract):
@@ -59,12 +60,16 @@ class HistoryWrapper(EWrapper):
                 symbol=? AND 
                 type=? AND 
                 currency=? AND 
-                exchange=?
+                exchange=? AND
+                contract=? AND
+                strike=?
         ''', (
             contract.symbol,
             contract.secType,
             contract.currency,
-            contract.exchange
+            contract.exchange,
+            contract.lastTradeDateOrContractMonth,
+            contract.strike
         ))
 
         result = cursor.fetchone()
@@ -73,12 +78,14 @@ class HistoryWrapper(EWrapper):
 
         if not result:
             cursor.execute('''
-                INSERT INTO security (symbol, type, currency,exchange) VALUES(?, ?, ?, ?)
+                INSERT INTO security (symbol, type, currency, exchange, contract, strike) VALUES(?, ?, ?, ?, ?, ?)
                 ''', (
                     contract.symbol,
                     contract.secType,
                     contract.currency,
-                    contract.exchange
+                    contract.exchange,
+                    contract.lastTradeDateOrContractMonth,
+                    contract.strike
                 )
             )
             
@@ -127,6 +134,7 @@ class HistoryWrapper(EWrapper):
     def historicalDataEnd(self, reqId: int, start: str, end: str):
         super().historicalDataEnd(reqId, start, end)
         print("HistoricalDataEnd ", reqId, "from", start, "to", end)
+        
         # wipe existing historical data
         cursor = self.sqlite_connection.cursor()
         cursor.execute('DELETE FROM prices WHERE security_id = ?', (self.contract_information[reqId]['database_id'],))
@@ -153,13 +161,29 @@ def create_database(filename):
     connection = sqlite3.connect(filename)
     cursor = connection.cursor()
 
+    # From the contracts overview in the documentation:
+    
+    # > "The simplest way to define a contract is by providing its symbol, security type, 
+    # > currency and exchange. The vast majority of stocks, CFDs, Indexes or FX pairs can 
+    # > be uniquely defined through these four attributes. More complex contracts such as 
+    # > options and futures require some extra information due to their nature."
+
+    # For futures, the "lastTradeDateOrContractMonth" attribute combined with the above mentioned
+    # fully define the contract object. Options also require a strike.
     cursor.execute('''
         CREATE TABLE security (
-            id INTEGER PRIMARY KEY, 
-            symbol TEXT, 
-            type TEXT, 
-            currency TEXT, 
-            exchange TEXT
+            id INTEGER PRIMARY KEY,            -- only relevant internally
+
+            symbol TEXT NOT NULL,
+            type TEXT NOT NULL,                -- type of security, i.e.: IND for index, FUT for future, STK for stock
+            currency TEXT NOT NULL,            -- i.e.: USD, CAD
+            exchange TEXT NOT NULL,            -- i.e.: GLOBEX, CBOE, CME, ARCA, TSE
+            contract TEXT NOT NULL DEFAULT "", -- i.e.: 201902. Required for futures.
+            strike FLOAT NOT NULL DEFAULT 0.0, -- i.e.: 54.0. Option strike.
+
+            -- for this unique constraint to work, we have to use default values rather than NULLs.
+            -- that's fine, because it's the same thing the IB API does.
+            UNIQUE (symbol, type, currency, exchange, contract, strike) 
         )
     ''')
     
@@ -195,16 +219,29 @@ if __name__ == '__main__':
 
     app = HistoryApp(sqlite_connection=connection)
 
-    app.wrapper.addTarget(InitializableContract(symbol="DTX", secType="IND", currency="USD", exchange="CBOE")) # transports
-    app.wrapper.addTarget(InitializableContract(symbol="INDU", secType="IND", currency="USD", exchange="CME")) # industrials
-    app.wrapper.addTarget(InitializableContract(symbol="SPY", secType="STK", currency="USD", exchange="ARCA"))  
+    #app.wrapper.addTarget(InitializableContract(symbol="DTX", secType="IND", currency="USD", exchange="CBOE")) # transports
+    #app.wrapper.addTarget(InitializableContract(symbol="INDU", secType="IND", currency="USD", exchange="CME")) # industrials
+    #app.wrapper.addTarget(InitializableContract(symbol="SPY", secType="STK", currency="USD", exchange="ARCA"))  
     #app.wrapper.addTarget(InitializableContract(symbol="WPK", secType="STK", currency="CAD", exchange="TSE"))
     #app.wrapper.addTarget(InitializableContract(symbol="USD", secType="CASH", currency="CAD", exchange="IDEALPRO")) # no historical data?
+    #app.wrapper.addTarget(InitializableContract(symbol="HEG9", secType="FUT", currency="USD", exchange="GLOBEX"))
+    
+    #for year in (2018, 2019):
+    #    for month in ('12', '02', '04', '05', '06', '07', '08', '10'):
+    for year in (2019,):
+        for month in ('02', '04'):
+            app.wrapper.addTarget(InitializableContract(
+                symbol="HE",
+                secType="FUT", 
+                currency="USD", 
+                exchange="GLOBEX", 
+                lastTradeDateOrContractMonth=f"{year}{month}", 
+            ))
 
-    app.connect("127.0.0.1", 7496, clientId=0)  # tws
-    #app.connect("127.0.0.1", 4001, clientId=0) # gateway
+    #app.connect("127.0.0.1", 7496, clientId=0)  # tws
+    app.connect("127.0.0.1", 4001, clientId=0) # gateway
 
-    logger.info("serverVersion:%s connectionTime:%s" % (app.serverVersion(), app.twsConnectionTime()))
+    logger.info(f"serverVersion:{app.serverVersion()} connectionTime:{app.twsConnectionTime()}")
     app.wrapper.fetchHistoryStarts()
     app.wrapper.fetchHistory()
 
